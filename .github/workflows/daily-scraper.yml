@@ -37,4 +37,5 @@ jobs:
           git config user.email "bot@bolehmasakapa.com"
           git add scraper/last_scrape.json
           git diff --staged --quiet || git commit -m "🍳 Daily scrape: $(date -u '+%Y-%m-%d')"
+          git pull --rebase origin main
           git push
