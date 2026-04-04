@@ -1,27 +1,26 @@
 """
-Boleh Masak Apa Hari Ini — Recipe Scraper (Raw Content Only)
-Scrapes raw blog content from Malaysian food blogs and saves to files.
-LLM processing is done separately via Claude Code.
+Boleh Masak Apa Hari Ini — Recipe Scraper
+Fetches Malaysian recipes from TheMealDB API + recipe bank.
+Saves raw content for LLM processing via Claude Code.
 Runs daily via GitHub Actions.
 """
 
 import os
 import json
-import re
+import random
 import requests
 from datetime import datetime, timezone
-from bs4 import BeautifulSoup
-
-SCRAPER_UA = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-}
 
 RAW_DIR = os.path.join(os.path.dirname(__file__), "raw")
 PROCESSED_FILE = os.path.join(os.path.dirname(__file__), "processed.json")
+BANK_FILE = os.path.join(os.path.dirname(__file__), "recipes_bank.json")
+
+MEALDB_MALAYSIAN = "https://www.themealdb.com/api/json/v1/1/filter.php?a=Malaysian"
+MEALDB_LOOKUP = "https://www.themealdb.com/api/json/v1/1/lookup.php?i="
+RESIPIKITA_API = "https://www.resipikita.com/wp-json/wp/v2/resipi"
 
 
 def load_processed() -> dict:
-    """Load the processed tracking file."""
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -29,34 +28,32 @@ def load_processed() -> dict:
 
 
 def save_processed(data: dict):
-    """Save the processed tracking file."""
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def slugify(text: str) -> str:
-    """Convert text to a safe filename slug."""
+    import re
     text = text.lower().strip()
     text = re.sub(r'[^\w\s-]', '', text)
     text = re.sub(r'[\s_]+', '-', text)
     return text[:80]
 
 
-def save_raw_recipe(name: str, chef: str, source_url: str, image_url: str, raw_text: str) -> str | None:
-    """Save raw recipe content to a JSON file. Returns filename or None if already exists."""
+def save_raw(name: str, chef: str, source: str, image_url: str, raw_text: str) -> str | None:
+    """Save raw recipe to file. Returns filename or None if exists."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     slug = slugify(name)
     filename = f"{today}_{slug}.json"
     filepath = os.path.join(RAW_DIR, filename)
 
-    # Skip if file already exists
     if os.path.exists(filepath):
         return None
 
     data = {
         "name": name,
         "chef": chef,
-        "source_url": source_url,
+        "source": source,
         "image_url": image_url,
         "raw_text": raw_text,
         "scraped_at": datetime.now(timezone.utc).isoformat(),
@@ -65,7 +62,6 @@ def save_raw_recipe(name: str, chef: str, source_url: str, image_url: str, raw_t
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    # Add to processed.json as "pending"
     processed = load_processed()
     processed[filename] = "pending"
     save_processed(processed)
@@ -74,132 +70,213 @@ def save_raw_recipe(name: str, chef: str, source_url: str, image_url: str, raw_t
 
 
 # ---------------------------------------------------------------------------
-# Scraper: Azie Kitchen
+# Source 1: TheMealDB API
 # ---------------------------------------------------------------------------
 
-def scrape_azie_kitchen(max_pages: int = 2) -> int:
-    print("\n=== Scraping Azie Kitchen ===")
+def fetch_mealdb_recipes() -> int:
+    """Fetch Malaysian recipes from TheMealDB API."""
+    print("\n=== Fetching from TheMealDB API ===")
     count = 0
 
-    for page in range(1, max_pages + 1):
-        url = f"https://www.aziekitchen.com/page/{page}/"
-        print(f"  Page {page}: {url}")
+    try:
+        resp = requests.get(MEALDB_MALAYSIAN, timeout=10)
+        meals = resp.json().get("meals") or []
+    except Exception as e:
+        print(f"  Error: {e}")
+        return 0
 
-        try:
-            resp = requests.get(url, headers=SCRAPER_UA, timeout=15)
-            if resp.status_code != 200:
-                print(f"  Skipping page {page} (status {resp.status_code})")
-                continue
-        except Exception as e:
-            print(f"  Error: {e}")
+    for meal in meals:
+        meal_id = meal["idMeal"]
+        name = meal["strMeal"]
+
+        # Check if already saved (any date)
+        processed = load_processed()
+        already = any(slugify(name) in key for key in processed)
+        if already:
+            print(f"  Already saved: {name}")
             continue
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        try:
+            detail = requests.get(f"{MEALDB_LOOKUP}{meal_id}", timeout=10).json()
+            m = detail["meals"][0]
+        except Exception:
+            continue
 
-        for article in soup.select("article"):
-            link_tag = article.select_one("a[href]")
-            if not link_tag:
-                continue
+        # Build raw text with ingredients
+        ingredients_text = ""
+        for i in range(1, 21):
+            ing = (m.get(f"strIngredient{i}") or "").strip()
+            measure = (m.get(f"strMeasure{i}") or "").strip()
+            if ing:
+                ingredients_text += f"- {measure} {ing}\n"
 
-            recipe_url = link_tag["href"]
+        raw_text = f"""Recipe: {m['strMeal']}
+Category: {m.get('strCategory', '')}
+Origin: {m.get('strArea', '')}
 
-            try:
-                resp2 = requests.get(recipe_url, headers=SCRAPER_UA, timeout=15)
-                if resp2.status_code != 200:
-                    continue
-            except Exception:
-                continue
+INGREDIENTS:
+{ingredients_text}
+INSTRUCTIONS:
+{m.get('strInstructions', '')}
+"""
 
-            soup2 = BeautifulSoup(resp2.text, "html.parser")
-
-            title_tag = soup2.select_one("h1.entry-title, h2.entry-title, h1")
-            if not title_tag:
-                continue
-            name = title_tag.get_text(strip=True)
-
-            image_url = ""
-            img_tag = soup2.select_one(".entry-content img, article img")
-            if img_tag:
-                image_url = img_tag.get("src", "")
-
-            content = soup2.select_one(".entry-content")
-            if not content:
-                continue
-
-            raw_text = content.get_text("\n", strip=True)
-
-            result = save_raw_recipe(name, "Azie Kitchen", recipe_url, image_url, raw_text)
-            if result:
-                count += 1
-                print(f"  Saved: {name}")
-            else:
-                print(f"  Already exists: {name}")
+        image_url = m.get("strMealThumb", "")
+        result = save_raw(name, "TheMealDB", f"themealdb.com/{meal_id}", image_url, raw_text)
+        if result:
+            count += 1
+            print(f"  Saved: {name}")
 
     return count
 
 
 # ---------------------------------------------------------------------------
-# Scraper: Rasa Malaysia
+# Source 2: Recipe Bank (curated Malaysian recipes)
 # ---------------------------------------------------------------------------
 
-def scrape_rasa_malaysia(max_pages: int = 2) -> int:
-    print("\n=== Scraping Rasa Malaysia ===")
-    count = 0
+def fetch_from_bank(count: int = 3) -> int:
+    """Pick random unprocessed recipes from the recipe bank."""
+    print("\n=== Picking from Recipe Bank ===")
 
-    for page in range(1, max_pages + 1):
-        url = f"https://rasamalaysia.com/page/{page}/"
-        print(f"  Page {page}: {url}")
+    if not os.path.exists(BANK_FILE):
+        print("  No recipe bank found. Skipping.")
+        return 0
 
-        try:
-            resp = requests.get(url, headers=SCRAPER_UA, timeout=15)
-            if resp.status_code != 200:
-                print(f"  Skipping page {page} (status {resp.status_code})")
-                continue
-        except Exception as e:
-            print(f"  Error: {e}")
-            continue
+    with open(BANK_FILE, "r", encoding="utf-8") as f:
+        bank = json.load(f)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-        links = soup.select("h2.entry-title a, h2 a[href*='rasamalaysia.com']")
+    processed = load_processed()
+    saved = 0
 
-        for link in links:
-            recipe_url = link.get("href", "")
-            if not recipe_url:
-                continue
+    # Find recipes not yet saved
+    available = []
+    for recipe in bank:
+        slug = slugify(recipe["name"])
+        already = any(slug in key for key in processed)
+        if not already:
+            available.append(recipe)
 
-            try:
-                resp2 = requests.get(recipe_url, headers=SCRAPER_UA, timeout=15)
-                if resp2.status_code != 200:
-                    continue
-            except Exception:
-                continue
+    if not available:
+        print("  All recipes from bank already saved!")
+        return 0
 
-            soup2 = BeautifulSoup(resp2.text, "html.parser")
+    # Pick random ones
+    picks = random.sample(available, min(count, len(available)))
 
-            title_tag = soup2.select_one("h2.wprm-recipe-name, h1.entry-title, h1")
-            if not title_tag:
-                continue
-            name = title_tag.get_text(strip=True)
+    for recipe in picks:
+        raw_text = f"""Recipe: {recipe['name']}
+Chef: {recipe.get('chef', 'Traditional')}
 
-            image_url = ""
-            img_tag = soup2.select_one(".wprm-recipe-image img, .entry-content img")
-            if img_tag:
-                image_url = img_tag.get("src", "")
+INGREDIENTS:
+{recipe.get('ingredients_text', 'No ingredients listed.')}
 
-            content = soup2.select_one(".entry-content, .wprm-recipe-container")
-            raw_text = content.get_text("\n", strip=True) if content else ""
+INSTRUCTIONS:
+{recipe.get('instructions_text', 'No instructions listed.')}
+"""
+        result = save_raw(
+            recipe["name"],
+            recipe.get("chef", "Traditional"),
+            recipe.get("source", "Recipe Bank"),
+            recipe.get("image_url", ""),
+            raw_text,
+        )
+        if result:
+            saved += 1
+            print(f"  Saved: {recipe['name']}")
 
-            if not raw_text:
-                continue
+    return saved
 
-            result = save_raw_recipe(name, "Rasa Malaysia", recipe_url, image_url, raw_text)
-            if result:
-                count += 1
-                print(f"  Saved: {name}")
-            else:
-                print(f"  Already exists: {name}")
 
-    return count
+# ---------------------------------------------------------------------------
+# Source 3: ResepiKita WordPress API
+# ---------------------------------------------------------------------------
+
+def fetch_resipikita(count: int = 3) -> int:
+    """Fetch random unprocessed recipes from ResepiKita API."""
+    import re
+    print("\n=== Fetching from ResepiKita API ===")
+
+    import html as html_module
+
+    def strip_html(text: str) -> str:
+        return html_module.unescape(re.sub(r'<[^>]+>', '', text or '')).strip()
+
+    try:
+        resp = requests.get(
+            RESIPIKITA_API,
+            params={"per_page": 100, "_fields": "title,slug,meta"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        recipes = resp.json()
+    except Exception as e:
+        print(f"  Error: {e}")
+        return 0
+
+    processed = load_processed()
+
+    available = []
+    for recipe in recipes:
+        meta = recipe.get("meta", {})
+        name = strip_html(meta.get("nama-resipi") or recipe["title"]["rendered"])
+        slug = slugify(name)
+        already = any(slug in key for key in processed)
+        if not already:
+            available.append(recipe)
+
+    if not available:
+        print("  All ResepiKita recipes already saved!")
+        return 0
+
+    picks = random.sample(available, min(count, len(available)))
+    saved = 0
+
+    for recipe in picks:
+        meta = recipe.get("meta", {})
+        name = strip_html(meta.get("nama-resipi") or recipe["title"]["rendered"])
+
+        # Extract ingredients
+        ingredients_raw = meta.get("bahan-utama") or {}
+        ingredients_lines = []
+        for i in range(50):
+            item = ingredients_raw.get(f"item-{i}")
+            if item is None:
+                break
+            bahan = strip_html(item.get("bahan", ""))
+            if bahan:
+                ingredients_lines.append(f"- {bahan}")
+
+        # Extract instructions
+        steps_raw = meta.get("step-step-masak") or {}
+        steps_lines = []
+        for i in range(30):
+            item = steps_raw.get(f"item-{i}")
+            if item is None:
+                break
+            langkah = strip_html(item.get("langkah", ""))
+            if langkah:
+                steps_lines.append(f"{i + 1}. {langkah}")
+
+        raw_text = (
+            f"Recipe: {name}\n"
+            f"Chef: Khairul Aming\n\n"
+            f"INGREDIENTS:\n"
+            f"{chr(10).join(ingredients_lines)}\n\n"
+            f"INSTRUCTIONS:\n"
+            f"{chr(10).join(steps_lines)}\n"
+        )
+
+        result = save_raw(
+            name,
+            "Khairul Aming",
+            f"resipikita.com/{recipe.get('slug', slugify(name))}",
+            "",
+            raw_text,
+        )
+        if result:
+            saved += 1
+            print(f"  Saved: {name}")
+
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -207,16 +284,16 @@ def scrape_rasa_malaysia(max_pages: int = 2) -> int:
 # ---------------------------------------------------------------------------
 
 def main():
-    print(f"=== Boleh Masak Apa — Raw Recipe Scraper ===")
+    print(f"=== Boleh Masak Apa — Recipe Scraper ===")
     print(f"Time: {datetime.now(timezone.utc).isoformat()}")
 
     os.makedirs(RAW_DIR, exist_ok=True)
 
     total = 0
-    total += scrape_rasa_malaysia(max_pages=2)
-    total += scrape_azie_kitchen(max_pages=2)
+    total += fetch_mealdb_recipes()
+    total += fetch_from_bank(count=3)
+    total += fetch_resipikita(count=3)
 
-    # Count stats
     processed = load_processed()
     pending = sum(1 for v in processed.values() if v == "pending")
     done = sum(1 for v in processed.values() if v == "done")
@@ -226,7 +303,6 @@ def main():
     print(f"  Total pending: {pending}")
     print(f"  Total processed: {done}")
 
-    # Save scrape log
     log = {
         "last_scrape": datetime.now(timezone.utc).isoformat(),
         "new_recipes_saved": total,
