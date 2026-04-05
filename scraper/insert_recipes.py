@@ -12,19 +12,22 @@ from datetime import datetime, timezone
 RAW_DIR = os.path.join(os.path.dirname(__file__), "raw")
 PROCESSED_FILE = os.path.join(os.path.dirname(__file__), "processed.json")
 
-# Load from .env in project root
-ENV_FILE = os.path.join(os.path.dirname(__file__), "..", ".env")
-env = {}
-if os.path.exists(ENV_FILE):
-    with open(ENV_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
+# Read from environment variables first (GitHub Actions), fallback to .env
+def _load_env_file():
+    env = {}
+    ENV_FILE = os.path.join(os.path.dirname(__file__), "..", ".env")
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip()
+    return env
 
-SUPABASE_URL = env.get("EXPO_PUBLIC_SUPABASE_URL", "")
-SUPABASE_KEY = env.get("EXPO_PUBLIC_SUPABASE_ANON_KEY", "")
+_env_file = _load_env_file()
+SUPABASE_URL = os.environ.get("SUPABASE_URL") or _env_file.get("EXPO_PUBLIC_SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or _env_file.get("EXPO_PUBLIC_SUPABASE_ANON_KEY", "")
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
