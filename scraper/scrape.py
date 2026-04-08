@@ -190,8 +190,8 @@ INSTRUCTIONS:
 # Source 3: ResepiKita WordPress API
 # ---------------------------------------------------------------------------
 
-def fetch_resipikita(count: int = 3) -> int:
-    """Fetch random unprocessed recipes from ResepiKita API."""
+def fetch_resipikita() -> int:
+    """Fetch all unprocessed recipes from ResepiKita API."""
     import re
     print("\n=== Fetching from ResepiKita API ===")
 
@@ -200,17 +200,29 @@ def fetch_resipikita(count: int = 3) -> int:
     def strip_html(text: str) -> str:
         return html_module.unescape(re.sub(r'<[^>]+>', '', text or '')).strip()
 
-    try:
-        resp = requests.get(
-            RESIPIKITA_API,
-            params={"per_page": 100, "_fields": "title,slug,meta"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        recipes = resp.json()
-    except Exception as e:
-        print(f"  Error: {e}")
-        return 0
+    recipes = []
+    page = 1
+    while True:
+        try:
+            resp = requests.get(
+                RESIPIKITA_API,
+                params={"per_page": 100, "page": page, "_fields": "title,slug,meta"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+        except Exception as e:
+            print(f"  Error on page {page}: {e}")
+            break
+        if not batch:
+            break
+        recipes.extend(batch)
+        print(f"  Fetched page {page} ({len(batch)} recipes)")
+        if len(batch) < 100:
+            break
+        page += 1
+
+    print(f"  Total fetched: {len(recipes)}")
 
     processed = load_processed()
 
@@ -227,10 +239,9 @@ def fetch_resipikita(count: int = 3) -> int:
         print("  All ResepiKita recipes already saved!")
         return 0
 
-    picks = random.sample(available, min(count, len(available)))
     saved = 0
 
-    for recipe in picks:
+    for recipe in available:
         meta = recipe.get("meta", {})
         name = strip_html(meta.get("nama-resipi") or recipe["title"]["rendered"])
 
@@ -292,7 +303,7 @@ def main():
     total = 0
     total += fetch_mealdb_recipes()
     total += fetch_from_bank(count=3)
-    total += fetch_resipikita(count=3)
+    total += fetch_resipikita()
 
     processed = load_processed()
     pending = sum(1 for v in processed.values() if v == "pending")
